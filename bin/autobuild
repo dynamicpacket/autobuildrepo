@@ -1,0 +1,293 @@
+#!/usr/bin/php
+<?php
+
+if(!isHost64bit())
+	die("ERROR, this software must run on a 64bit host.\n");
+
+// load config file for GLOBALs and BUILDs
+$cfg = parse_ini_file("/opt/autobuildrepo/autobuild.conf", true);
+$global = (object) array();
+
+$targetPkg = isset($argv[1]) ? $argv[1] : "";
+
+// get packages we need to build
+$packages = cfgGetPackages();
+
+// process each
+foreach($packages as $pkg)
+{
+	if(strlen($targetPkg) > 0)
+	{
+		if(strcasecmp($targetPkg,$pkg->key) != 0)
+		{
+			echo "Skipping $pkg->key...\n";
+			continue;
+		}
+	}
+
+	echo "######################################################\n";
+	echo "[AUTOBUILD] Processing '$pkg->key' settings..\n";
+
+	if(shouldBuildPackage($pkg))
+		buildPackage($pkg);
+	else
+		echo "Package '$pkg->key' is already up to date\n";
+
+	echo "\n";
+}
+
+function buildPackage($pkg)
+{
+	global $cfg;
+	
+	echo "Build started for '$pkg->key'\n";
+
+	# echo var_dump($pkg) . "\n";
+	# echo "#########################################\n";
+
+	// change to code dir
+	chdir($pkg->codedir);	
+
+	// make sure to link spec dir if does not exist
+	if($pkg->pkgdir != "debian" && !file_exists("debian"))
+		symlink($pkg->pkgdir,"debian");	
+		
+	// prepare enviroment
+	buildPackageEnv($pkg);
+	
+	// make sure output directory exists
+	existsOrCreateDir($pkg->outputdir);
+	
+	// absolute path to build script
+	$bb = $cfg['global']['bindir'] . "/build.sh";
+
+	// execute	
+	exec($bb, $lines, $res);
+	
+	// succeed or fail
+	if($res===0)
+	{
+		echo "Built '$pkg->key' OK..\n";
+		// touch status file for this rev
+		existsOrCreateDir(dirname($pkg->statusfile));
+		touch($pkg->statusfile);
+	}
+	else
+	{
+		echo "ERROR building '$pkg->key'..\n";
+		echo "RESULT '$res'\n";
+		echo "######################################################\n";
+		foreach($lines as $line)
+			echo $line . "\n";
+		echo "######################################################\n";
+	}
+}
+
+function buildPackageEnv($pkg)
+{
+	$vars = array(
+		'WORKDIR'	=>	$pkg->codedir,
+		'OUTDIR'	=>	$pkg->outputdir,
+		'BLDKEY'	=>	$pkg->key,
+		'BLD64'		=>	($pkg->build64 ? 1 : 0),
+		'BLD32'		=>	($pkg->build32 && hasPbuilder() ? 1 : 0),
+		'BLDREV'	=>	$pkg->buildrev,
+		'BLDNAME'	=>	$pkg->debcomm,
+		'BLDAUTHOR'	=>	$pkg->debauthor,
+		'BLDEMAIL'	=>	$pkg->debemail,		
+	);
+	
+	foreach($vars as $k => $v)
+		putenv("$k=$v");
+}
+
+function cfgGetPackages()
+{
+	global $cfg, $global;
+	$res = array();
+	$defs = array();
+	
+	foreach($cfg as $k => $v)
+	{
+		if($k=="global")
+		{
+			$defs = $v;
+			$global = (object) $v;
+			continue;
+		}
+		
+		// make sure every global set in local package
+		foreach($defs as $gk => $gv)
+		{
+			if(!isset($v[$gk]))
+				$v[$gk] = $gv;
+		}
+		
+		// push onto list
+		$v['key'] = $k;
+		$res[$k] = (object) $v;
+	}
+	
+	// push packages into global cfg
+	$cfg['packages'] = $res;
+	
+	return $res;
+}
+
+function cfgGet($pkg,$key) {
+	global $cfg;
+	if(isset($cfg[$pkg]) && isset($cfg[$pkg][$key]))
+		return $cfg[$pkg][$key];
+	else if(isset($cfg['global']) && isset($cfg['global'][$key]))
+		return $cfg['global'][$key];		
+	return null;
+}
+
+function shouldBuildPackage($pkg) {
+
+	$shouldBuild = false;
+	
+	if($pkg->repotype == "svn")
+	{
+		// check if we've built this		
+		$codeDir = join('/',array($pkg->workingdir, $pkg->key, 'code'));
+		$statDir = join('/',array($pkg->workingdir, $pkg->key, 'stat'));
+
+		// make sure stat dir exists
+		if(!file_exists($statDir))
+			mkdir($statDir,0777,true);
+
+		// make sure directory exists
+		if(!file_exists($codeDir))
+		{
+			echo "Checking out SVN source...\n";
+			mkdir($codeDir,0777,true);
+			$shouldBuild = true;
+			chdir($codeDir);
+			exec("svn co $pkg->repourl .");
+		}
+		else
+		{
+			echo "Updating SVN source...\n";
+			chdir($codeDir);
+			exec("svn up");			
+		}
+		
+		// get svn data
+		$data = getSvnInfo($codeDir);
+		
+		// push rev into pkg
+		$pkg->{'buildrev'} = $data->last_changed_rev;
+		
+		// path to status file		
+		$pkgStatusFile = join('/',array($statDir, "rev_".$data->last_changed_rev));
+		$pkg->{'statusfile'} = $pkgStatusFile;
+		$pkg->{'codedir'} = $codeDir;
+		
+		// verify we need to build this
+		if(!$shouldBuild)
+		{
+			if(!file_exists($pkg->{'statusfile'}))
+				$shouldBuild = true;
+		}
+	}
+	else if($pkg->repotype == "git")
+	{
+		// check if we've built this		
+		$codeDir = join('/',array($pkg->workingdir, $pkg->key, 'code'));
+		$statDir = join('/',array($pkg->workingdir, $pkg->key, 'stat'));
+
+		// make sure stat dir exists
+		if(!file_exists($statDir))
+			mkdir($statDir,0777,true);
+
+		// make sure directory exists
+		if(!file_exists($codeDir))
+		{
+			echo "Checking out GIT source...\n";
+			mkdir($codeDir,0777,true);
+			$shouldBuild = true;
+			chdir($codeDir);
+			exec("git clone $pkg->repourl .");
+		}
+		else
+		{
+			echo "Updating GIT source...\n";
+			chdir($codeDir);
+			exec("git pull");			
+		}
+		
+		// get svn data
+		$data = getGitInfo($codeDir);
+		
+		// push rev into pkg
+		$pkg->{'buildrev'} = $data->last_changed_rev;
+		
+		// path to status file		
+		$pkgStatusFile = join('/',array($statDir, "rev_".$data->last_changed_rev));
+		$pkg->{'statusfile'} = $pkgStatusFile;
+		$pkg->{'codedir'} = $codeDir;
+		
+		// verify we need to build this
+		if(!$shouldBuild)
+		{
+			if(!file_exists($pkg->{'statusfile'}))
+				$shouldBuild = true;
+		}
+	}
+	else
+	{
+		// error, invalid repo type
+		die("ERROR: Invalid repo type '$pkg->repotype'\n");
+	}
+	
+	return $shouldBuild;
+}
+
+function existsOrCreateDir($dir,$mode='0777') {
+	if(!file_exists($dir))
+		mkdir($dir,$mode,true);
+}
+
+function hasPbuilder()
+{
+	if(file_exists('/usr/sbin/pbuilder'))
+		return true;
+	return false;
+}
+
+function isHost64bit()
+{
+	$arch = `uname -m`;	
+	if(stristr($arch,'x86_64') !== false)
+		return true;
+		
+	return false;
+}
+
+function getSvnInfo($svnDir) {
+	$cwd = getcwd();	
+	chdir($svnDir);
+	exec("svn info",$lines,$status);
+	$res = array();
+	foreach($lines as $line)
+	{
+		if(strlen($line) < 3)
+			continue;		
+		list($k,$v) = explode(":",$line,2);
+		$k = str_replace(" ","_",strtolower($k));
+		$res[$k] = trim($v);
+	}
+	chdir($cwd);
+	return (object) $res;
+}
+
+function getGitInfo($gitDir) {
+	$cwd = getcwd();	
+	chdir($gitDir);	
+	$res = array(
+		'last_changed_rev' => trim(`git rev-parse --short HEAD`),
+	);
+	chdir($cwd);
+	return (object) $res;
+}
