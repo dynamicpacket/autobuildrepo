@@ -5,7 +5,10 @@ if(!isHost64bit())
 	die("ERROR, this software must run on a 64bit host.\n");
 
 // load config file for GLOBALs and BUILDs
-$cfg = parse_ini_file("/opt/autobuildrepo/autobuild.conf", true);
+$defaultConfig = "/opt/autobuildrepo/autobuild.conf";
+if(file_exists("/etc/autobuild.conf"))
+	$defaultConfig = "/etc/autobuild.conf";
+$cfg = parse_ini_file($defaultConfig, true);
 $global = (object) array();
 
 $targetPkg = isset($argv[1]) ? $argv[1] : "";
