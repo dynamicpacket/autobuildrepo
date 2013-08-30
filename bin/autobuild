@@ -220,6 +220,9 @@ function shouldBuildPackage($pkg) {
 			exec("git pull");			
 		}
 		
+		if(isset($pkg->repobranch))
+			exec("git checkout $pkg->repobranch");
+		
 		// get svn data
 		$data = getGitInfo($codeDir);
 		
